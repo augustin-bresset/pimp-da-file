@@ -17,7 +17,13 @@ Rendu des pages par [pdf.js](https://mozilla.github.io/pdf.js/), manipulation pa
     (rectangle blanc) ;
   - remplir les champs de formulaire pour les PDF qui en contiennent
     (avec option d'aplatissement) ;
-  - zoom avant/arrière et ajustement à la fenêtre.
+  - zoom avant/arrière et ajustement à la fenêtre ;
+  - annuler / rétablir : boutons ↶ ↷ ou **Ctrl+Z** / **Ctrl+Maj+Z** (⌘ sur Mac),
+    couvrant retouches, ajouts, suppressions et déplacements.
+
+L'interface s'adapte au mobile (barre d'outils compacte, cibles tactiles
+élargies) et l'app est installable sur l'écran d'accueil une fois déployée
+(manifeste web fourni).
 
 ## Lancer en local
 

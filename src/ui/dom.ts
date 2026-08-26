@@ -47,6 +47,7 @@ export const icons = {
   move: S('<path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/>', 12),
   ibeam: S('<path d="M8 4c2 0 3 .7 4 2 1-1.3 2-2 4-2M8 20c2 0 3-.7 4-2 1 1.3 2 2 4 2M12 6v12"/>', 15),
   undo: S('<path d="M4 10h10a5 5 0 110 10H9"/><path d="M8 6l-4 4 4 4"/>', 15),
+  redo: S('<path d="M20 10H10a5 5 0 100 10h5"/><path d="M16 6l4 4-4 4"/>', 15),
   zoomin: S('<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M11 8.5v5M8.5 11h5"/>', 15),
   zoomout: S('<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5"/>', 15),
   fit: S('<rect x="4" y="6" width="16" height="12" rx="1.5"/><path d="M8 12h8M8 12l2-2M8 12l2 2M16 12l-2-2M16 12l-2 2"/>', 15),

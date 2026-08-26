@@ -228,6 +228,8 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .btn-icon:hover { background: var(--paper); color: var(--ink); }
 .btn-icon.danger:hover { background: #FBEEEC; color: var(--danger); }
+.btn-icon:disabled { opacity: 0.3; cursor: default; }
+.btn-icon:disabled:hover { background: none; color: var(--ink-2); }
 
 /* ── Espace de travail commun ─────────────────────────────────────────── */
 
@@ -611,6 +613,57 @@ input, select, textarea { font: inherit; color: inherit; }
   .edit-cols { flex-direction: column; }
   .form-panel { width: 100%; max-height: 300px; }
 }
+
+/* ── Mobile ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 700px) {
+  body { font-size: 14.5px; }
+  .topbar { height: 52px; padding: 0 12px; gap: 10px; }
+  .wordmark { font-size: 17px; }
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { padding: 8px 9px; font-size: 13.5px; white-space: nowrap; }
+  .work { padding: 14px 12px; gap: 14px; }
+  .work-title { font-size: 18px; }
+
+  /* barre d'outils : icônes seules, défilement horizontal */
+  .toolbar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 8px; }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .tool-btn .tb-label { display: none; }
+  .tool-btn { padding: 9px 10px; }
+  .btn-icon { padding: 9px; }
+  .pager input { width: 40px; }
+
+  .actionbar .btn-primary { flex: 1; justify-content: center; }
+  .sheet { width: min(300px, 80vw); }
+  .strip { padding: 14px 8px; }
+  .pg { width: 96px; }
+  .gut { width: 26px; }
+  .m-card { padding: 8px 10px; gap: 10px; }
+  .m-card .grip { display: none; } /* le glisser-déposer HTML5 n'existe pas au doigt : flèches ↑↓ */
+  .m-index { min-width: 18px; }
+
+  #toasts { bottom: 16px; left: 16px; right: 16px; transform: none; }
+  .toast { max-width: 100%; text-align: center; }
+  .foot { padding: 10px; font-size: 10px; }
+}
+
+/* écrans tactiles : cibles plus grandes, pas d'états au survol */
+@media (hover: none) {
+  .sheet-sub { display: none; }
+  .gut::before { border-color: var(--line-strong); }
+  .gut .sc { opacity: 1; }
+}
+
+@media (pointer: coarse) {
+  .ov-handle { width: 22px; height: 22px; right: -11px; bottom: -11px; }
+  .ov-grip { top: -30px; padding: 5px 10px; }
+  /* évite le zoom automatique d'iOS au focus des champs */
+  .tl-input, .ff input[type="text"], .ff select, .ff textarea,
+  .pager input, .ctx input[type="number"] { font-size: 16px; }
+}
+
+.ov-grip, .ov-handle { touch-action: none; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

@@ -46,10 +46,18 @@ interface RunBox { x: number; y: number; w: number; h: number; fontH: number; }
 
 type Arm = 'text' | 'image' | 'rect' | 'retouch' | null;
 
+interface Geom { vx: number; vy: number; vw?: number; vh?: number; }
+type Action =
+  | { type: 'retouch'; prev: ArrayBuffer; next: ArrayBuffer }
+  | { type: 'add'; ovs: Ov[] }
+  | { type: 'remove'; ovs: Ov[] }
+  | { type: 'geom'; id: number; from: Geom; to: Geom };
+
 interface EditState {
   lp: LoadedPdf;
   working: ArrayBuffer; // état courant du PDF (retouches réelles incluses)
-  history: ArrayBuffer[]; // états précédents, pour Annuler
+  undo: Action[];
+  redo: Action[];
   current: number;
   scale: number;
   zoom: number | 'fit';
@@ -85,6 +93,18 @@ export function initEdit(rootEl: HTMLElement): void {
     const a = document.activeElement as HTMLElement | null;
     const editing =
       a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a instanceof HTMLSelectElement || !!a?.isContentEditable;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !editing && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      if (e.shiftKey) void redo();
+      else void undo();
+      return;
+    }
+    if (mod && !editing && (e.key === 'y' || e.key === 'Y')) {
+      e.preventDefault();
+      void redo();
+      return;
+    }
     if (e.key === 'Escape') {
       disarm();
       select(null);
@@ -104,7 +124,8 @@ async function loadFile(files: File[]): Promise<void> {
     st = {
       lp,
       working: lp.bytes,
-      history: [],
+      undo: [],
+      redo: [],
       current: 1,
       scale: 1,
       zoom: 'fit',
@@ -200,11 +221,13 @@ function render(): void {
   const toolbar = el(
     'div',
     { class: 'toolbar' },
-    el('button', { class: 'tool-btn', id: 'arm-retouch', title: 'Modifier le texte existant du PDF', onclick: () => arm('retouch') }, icon('ibeam'), 'Retoucher'),
-    el('button', { class: 'tool-btn', id: 'arm-text', onclick: () => arm('text') }, icon('text'), 'Texte'),
-    el('button', { class: 'tool-btn', onclick: () => imgInput.click() }, icon('image'), 'Image'),
-    el('button', { class: 'tool-btn', id: 'arm-rect', onclick: () => arm('rect') }, icon('mask'), 'Masquer'),
-    el('button', { class: 'tool-btn', id: 'undo-btn', style: 'display:none', title: 'Annuler la dernière retouche', onclick: () => void undoRetouch() }, icon('undo'), 'Annuler'),
+    el('button', { class: 'tool-btn', id: 'arm-retouch', title: 'Modifier le texte existant du PDF', onclick: () => arm('retouch') }, icon('ibeam'), el('span', { class: 'tb-label' }, 'Retoucher')),
+    el('button', { class: 'tool-btn', id: 'arm-text', title: 'Ajouter du texte', onclick: () => arm('text') }, icon('text'), el('span', { class: 'tb-label' }, 'Texte')),
+    el('button', { class: 'tool-btn', title: 'Ajouter une image', onclick: () => imgInput.click() }, icon('image'), el('span', { class: 'tb-label' }, 'Image')),
+    el('button', { class: 'tool-btn', id: 'arm-rect', title: 'Masquer une zone', onclick: () => arm('rect') }, icon('mask'), el('span', { class: 'tb-label' }, 'Masquer')),
+    el('div', { class: 'sep' }),
+    el('button', { class: 'btn-icon', id: 'undo-btn', title: 'Annuler (Ctrl+Z)', onclick: () => void undo() }, icon('undo')),
+    el('button', { class: 'btn-icon', id: 'redo-btn', title: 'Rétablir (Ctrl+Maj+Z)', onclick: () => void redo() }, icon('redo')),
     imgInput,
     el('div', { class: 'sep' }),
     ctxControls(),
@@ -503,44 +526,111 @@ async function commitRetouch(item: TLItem, idx: number, value: string, box: RunB
   });
 
   if (res.outcome === 'edited') {
-    st.history.push(st.working);
-    if (st.history.length > 6) st.history.shift();
+    const prev = st.working;
     st.working = res.bytes.buffer.slice(res.bytes.byteOffset, res.bytes.byteOffset + res.bytes.byteLength) as ArrayBuffer;
+    pushAction({ type: 'retouch', prev, next: st.working });
     await reloadWorking();
-    syncUndo();
     toast('Texte modifié directement dans le PDF.');
   } else {
     // repli : masque blanc + texte par-dessus, à la même position
     const s = st.scale;
     const pad = 1.5;
-    st.ovs.push({
+    const rectOv: OvRect = {
       id: nextId++, kind: 'rect', page: st.current,
       vx: box.x / s - pad, vy: box.y / s - pad,
       vw: box.w / s + 2 * pad, vh: box.h / s + 2 * pad,
-    });
-    st.ovs.push({
+    };
+    const textOv: OvText = {
       id: nextId++, kind: 'text', page: st.current,
       vx: box.x / s, vy: box.y / s - (box.fontH / s) * 0.12,
       text: value, size: Math.max(6, Math.round(box.fontH / s)), color: 'noir',
-    });
+    };
+    st.ovs.push(rectOv, textOv);
+    pushAction({ type: 'add', ovs: [rectOv, textOv] });
     renderOverlays();
     toast(`Édition directe impossible (${res.reason}) — remplacement visuel appliqué.`, 'err');
   }
 }
 
-async function undoRetouch(): Promise<void> {
+/* ── Annuler / Rétablir ─────────────────────────────────────────────── */
+
+function pushAction(a: Action): void {
   if (!st) return;
-  const prev = st.history.pop();
-  if (!prev) return;
-  st.working = prev;
-  await reloadWorking();
+  st.undo.push(a);
+  st.redo = [];
+  while (st.undo.length > 40) st.undo.shift();
+  // les retouches réelles portent une copie du document : on en garde peu
+  let retouches = st.undo.filter((x) => x.type === 'retouch').length;
+  while (retouches > 5) {
+    const i = st.undo.findIndex((x) => x.type === 'retouch');
+    st.undo.splice(i, 1);
+    retouches--;
+  }
   syncUndo();
-  toast('Retouche annulée.');
+}
+
+async function undo(): Promise<void> {
+  if (!st) return;
+  const a = st.undo.pop();
+  if (!a) return;
+  st.redo.push(a);
+  await applyAction(a, true);
+  syncUndo();
+}
+
+async function redo(): Promise<void> {
+  if (!st) return;
+  const a = st.redo.pop();
+  if (!a) return;
+  st.undo.push(a);
+  await applyAction(a, false);
+  syncUndo();
+}
+
+async function applyAction(a: Action, isUndo: boolean): Promise<void> {
+  if (!st) return;
+  if (a.type === 'retouch') {
+    st.working = isUndo ? a.prev : a.next;
+    await reloadWorking();
+  } else if (a.type === 'add') {
+    if (isUndo) removeSilent(a.ovs.map((o) => o.id));
+    else { st.ovs.push(...a.ovs); renderOverlays(); }
+  } else if (a.type === 'remove') {
+    if (isUndo) { st.ovs.push(...a.ovs); renderOverlays(); }
+    else removeSilent(a.ovs.map((o) => o.id));
+  } else {
+    const ov = st.ovs.find((o) => o.id === a.id);
+    if (ov) {
+      const g = isUndo ? a.from : a.to;
+      ov.vx = g.vx;
+      ov.vy = g.vy;
+      if (ov.kind !== 'text' && g.vw !== undefined && g.vh !== undefined) {
+        ov.vw = g.vw;
+        ov.vh = g.vh;
+      }
+      renderOverlays();
+    }
+  }
+}
+
+function removeSilent(ids: number[]): void {
+  if (!st) return;
+  st.ovs = st.ovs.filter((o) => !ids.includes(o.id));
+  if (st.selected != null && ids.includes(st.selected)) st.selected = null;
+  renderOverlays();
+}
+
+function snapshotGeom(ov: Ov): Geom {
+  return ov.kind === 'text'
+    ? { vx: ov.vx, vy: ov.vy }
+    : { vx: ov.vx, vy: ov.vy, vw: ov.vw, vh: ov.vh };
 }
 
 function syncUndo(): void {
-  const b = document.getElementById('undo-btn');
-  if (b) b.style.display = st && st.history.length > 0 ? '' : 'none';
+  const u = document.getElementById('undo-btn') as HTMLButtonElement | null;
+  const r = document.getElementById('redo-btn') as HTMLButtonElement | null;
+  if (u) u.disabled = !st || st.undo.length === 0;
+  if (r) r.disabled = !st || st.redo.length === 0;
 }
 
 /* ── Calques : création ─────────────────────────────────────────────── */
@@ -623,6 +713,7 @@ function placeAt(e: PointerEvent): void {
   }
 
   st.ovs.push(ov);
+  pushAction({ type: 'add', ovs: [ov] });
   disarm();
   select(ov.id);
   renderOverlays();
@@ -678,8 +769,9 @@ function syncCtx(): void {
 function removeOv(id: number): void {
   if (!st) return;
   const ov = st.ovs.find((o) => o.id === id);
-  if (ov?.kind === 'image') URL.revokeObjectURL(ov.url);
+  if (!ov) return;
   st.ovs = st.ovs.filter((o) => o.id !== id);
+  pushAction({ type: 'remove', ovs: [ov] });
   select(null);
   renderOverlays();
 }
@@ -768,6 +860,7 @@ function startDrag(e: PointerEvent, ov: Ov, mode: 'move' | 'resize'): void {
   const oy = ov.vy;
   const ow = ov.kind !== 'text' ? ov.vw : 0;
   const oh = ov.kind !== 'text' ? ov.vh : 0;
+  const g0 = snapshotGeom(ov);
   const maxX = layer.clientWidth / s;
   const maxY = layer.clientHeight / s;
   const node = layer.querySelector<HTMLElement>(`[data-ov="${ov.id}"]`);
@@ -787,7 +880,11 @@ function startDrag(e: PointerEvent, ov: Ov, mode: 'move' | 'resize'): void {
     }
     if (node) applyGeom(node, ov);
   };
-  const onUp = () => window.removeEventListener('pointermove', onMove);
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    const g1 = snapshotGeom(ov);
+    if (JSON.stringify(g0) !== JSON.stringify(g1)) pushAction({ type: 'geom', id: ov.id, from: g0, to: g1 });
+  };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp, { once: true });
 }
