@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>open-pdf</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M6 2h14l6 6v22H6z' fill='%232740D6'/%3E%3Cpath d='M20 2l6 6h-6z' fill='%23AFBBF3'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600;700&family=Instrument+Sans:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="wordmark">open<span>·</span>pdf</div>
+    <nav class="tabs" role="tablist" aria-label="Outils">
+      <button class="tab is-active" role="tab" aria-selected="true" data-tool="merge">Fusionner</button>
+      <button class="tab" role="tab" aria-selected="false" data-tool="split">Diviser</button>
+      <button class="tab" role="tab" aria-selected="false" data-tool="edit">Éditer</button>
+    </nav>
+    <div class="local-badge" title="Tout se passe dans ce navigateur, aucun fichier n'est envoyé."><span class="dot"></span>100&nbsp;% local</div>
+  </header>
+
+  <main id="app">
+    <section class="view is-active" id="view-merge" role="tabpanel"></section>
+    <section class="view" id="view-split" role="tabpanel"></section>
+    <section class="view" id="view-edit" role="tabpanel"></section>
+  </main>
+
+  <footer class="foot">Vos fichiers ne quittent jamais ce navigateur — aucun envoi, aucun serveur.</footer>
+  <div id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
