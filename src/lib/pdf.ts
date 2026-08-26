@@ -18,10 +18,14 @@ export function isPdfFile(f: File): boolean {
 
 export async function openPdf(file: File): Promise<LoadedPdf> {
   const bytes = await file.arrayBuffer();
+  return pdfFromBytes(bytes, file.name);
+}
+
+export async function pdfFromBytes(bytes: ArrayBuffer, name: string): Promise<LoadedPdf> {
   // pdf.js transfère le buffer vers son worker : on lui donne une copie,
   // l'original reste intact pour pdf-lib.
   const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
-  return { name: file.name, size: file.size, bytes, doc, pageCount: doc.numPages };
+  return { name, size: bytes.byteLength, bytes, doc, pageCount: doc.numPages };
 }
 
 export async function renderPage(

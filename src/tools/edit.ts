@@ -12,7 +12,8 @@ import {
 import type { PageViewport } from 'pdfjs-dist';
 import { el, icon, toast, fmtSize } from '../ui/dom';
 import { dropSheet } from '../ui/dropsheet';
-import { openPdf, renderPage, download, baseName, type LoadedPdf } from '../lib/pdf';
+import { openPdf, pdfFromBytes, renderPage, download, baseName, type LoadedPdf } from '../lib/pdf';
+import { applyTextEdit } from '../lib/contentedit';
 
 /* Les positions sont stockées en unités « viewport à l'échelle 1 » :
    1 unité = 1 point PDF (pour une page non pivotée). L'affichage multiplie
@@ -40,13 +41,22 @@ interface FieldInfo {
   value: string | boolean;
 }
 
+interface TLItem { str: string; transform: number[]; width: number; }
+interface RunBox { x: number; y: number; w: number; h: number; fontH: number; }
+
+type Arm = 'text' | 'image' | 'rect' | 'retouch' | null;
+
 interface EditState {
   lp: LoadedPdf;
+  working: ArrayBuffer; // état courant du PDF (retouches réelles incluses)
+  history: ArrayBuffer[]; // états précédents, pour Annuler
   current: number;
   scale: number;
+  zoom: number | 'fit';
+  vpT: number[] | null; // matrice viewport de la page affichée
   ovs: Ov[];
   selected: number | null;
-  arm: 'text' | 'image' | 'rect' | null;
+  arm: Arm;
   pendingImage: { bytes: ArrayBuffer; isPng: boolean; url: string; ratio: number } | null;
   fields: FieldInfo[];
   values: Map<string, string | boolean>;
@@ -57,6 +67,7 @@ let st: EditState | null = null;
 let nextId = 1;
 let root: HTMLElement;
 let layer: HTMLElement | null = null;
+let tlItems: TLItem[] = [];
 let resizeTimer: number | undefined;
 
 export function initEdit(rootEl: HTMLElement): void {
@@ -77,7 +88,7 @@ export function initEdit(rootEl: HTMLElement): void {
     if (e.key === 'Escape') {
       disarm();
       select(null);
-      (a as HTMLElement | null)?.blur?.();
+      a?.blur?.();
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && !editing && st.selected != null) {
       e.preventDefault();
@@ -92,8 +103,12 @@ async function loadFile(files: File[]): Promise<void> {
     const fields = await probeFields(lp.bytes);
     st = {
       lp,
+      working: lp.bytes,
+      history: [],
       current: 1,
       scale: 1,
+      zoom: 'fit',
+      vpT: null,
       ovs: [],
       selected: null,
       arm: null,
@@ -150,7 +165,7 @@ function render(): void {
         multiple: false,
         title: 'Déposez un PDF',
         caption:
-          'Ajoutez du texte ou une image, masquez une zone, remplissez les champs de formulaire — puis téléchargez le résultat.',
+          'Retouchez le texte existant, ajoutez du texte ou une image, masquez une zone, remplissez les champs de formulaire — puis téléchargez le résultat.',
         onFiles: (files) => void loadFile(files),
       }),
     );
@@ -185,15 +200,26 @@ function render(): void {
   const toolbar = el(
     'div',
     { class: 'toolbar' },
+    el('button', { class: 'tool-btn', id: 'arm-retouch', title: 'Modifier le texte existant du PDF', onclick: () => arm('retouch') }, icon('ibeam'), 'Retoucher'),
     el('button', { class: 'tool-btn', id: 'arm-text', onclick: () => arm('text') }, icon('text'), 'Texte'),
     el('button', { class: 'tool-btn', onclick: () => imgInput.click() }, icon('image'), 'Image'),
     el('button', { class: 'tool-btn', id: 'arm-rect', onclick: () => arm('rect') }, icon('mask'), 'Masquer'),
+    el('button', { class: 'tool-btn', id: 'undo-btn', style: 'display:none', title: 'Annuler la dernière retouche', onclick: () => void undoRetouch() }, icon('undo'), 'Annuler'),
     imgInput,
     el('div', { class: 'sep' }),
     ctxControls(),
     el('div', { class: 'spacer' }),
     el(
-      'div',
+      'span',
+      { class: 'pager' },
+      el('button', { class: 'btn-icon', title: 'Zoom arrière', onclick: () => zoomBy(1 / 1.2) }, icon('zoomout')),
+      el('span', { class: 'zoom-label', id: 'zoom-label' }, '—'),
+      el('button', { class: 'btn-icon', title: 'Zoom avant', onclick: () => zoomBy(1.2) }, icon('zoomin')),
+      el('button', { class: 'btn-icon', title: 'Ajuster à la fenêtre', onclick: () => { if (st) { st.zoom = 'fit'; void renderCurrentPage(); } } }, icon('fit')),
+    ),
+    el('div', { class: 'sep' }),
+    el(
+      'span',
       { class: 'pager' },
       el('button', { class: 'btn-icon', title: 'Page précédente', onclick: () => goTo(st!.current - 1) }, icon('left')),
       pageInput,
@@ -241,12 +267,13 @@ function render(): void {
         { class: 'actionbar' },
         st.fields.length > 0
           ? el('label', { class: 'flatten-opt', for: 'flatten' }, flatten, 'Aplatir le formulaire (champs non modifiables ensuite)')
-          : el('span', { class: 'work-meta' }, 'Les ajouts sont fusionnés dans le PDF téléchargé.'),
+          : el('span', { class: 'work-meta' }, 'Retouches et ajouts sont fusionnés dans le PDF téléchargé.'),
         el('div', { class: 'spacer' }),
         exportBtn,
       ),
     ),
   );
+  syncUndo();
 }
 
 function ctxControls(): HTMLElement {
@@ -340,15 +367,20 @@ async function renderCurrentPage(): Promise<void> {
 
   const page = await st.lp.doc.getPage(st.current);
   const vp1 = page.getViewport({ scale: 1 });
-  const avail = Math.max(280, scroll.clientWidth - 24);
-  st.scale = Math.min(1.75, avail / vp1.width);
+  if (st.zoom === 'fit') {
+    const avail = Math.max(280, scroll.clientWidth - 24);
+    st.scale = Math.min(1.75, avail / vp1.width);
+  } else {
+    st.scale = st.zoom;
+  }
 
-  const { canvas } = await renderPage(st.lp.doc, st.current, st.scale);
+  const { canvas, viewport } = await renderPage(st.lp.doc, st.current, st.scale);
+  st.vpT = viewport.transform as number[];
 
   layer = el('div', { class: 'ov-layer' });
   layer.addEventListener('pointerdown', (e) => {
     if (!st) return;
-    if (st.arm) {
+    if (st.arm && st.arm !== 'retouch') {
       e.preventDefault();
       placeAt(e);
       return;
@@ -357,7 +389,17 @@ async function renderCurrentPage(): Promise<void> {
   });
 
   wrap.replaceChildren(canvas, layer);
+  const zl = document.getElementById('zoom-label');
+  if (zl) zl.textContent = `${Math.round(st.scale * 100)} %`;
   renderOverlays();
+  syncArmUi();
+  if (st.arm === 'retouch') await buildTextLayer();
+}
+
+function zoomBy(f: number): void {
+  if (!st) return;
+  st.zoom = Math.min(3, Math.max(0.35, st.scale * f));
+  void renderCurrentPage();
 }
 
 function goTo(p: number): void {
@@ -370,27 +412,172 @@ function goTo(p: number): void {
   void renderCurrentPage();
 }
 
+async function reloadWorking(): Promise<void> {
+  if (!st) return;
+  const old = st.lp.doc;
+  const lp2 = await pdfFromBytes(st.working, st.lp.name);
+  st.lp = lp2;
+  void old.destroy();
+  await renderCurrentPage();
+}
+
+/* ── Retoucher : édition du texte existant ──────────────────────────── */
+
+function mul(m1: number[], m2: number[]): number[] {
+  return [
+    m1[0] * m2[0] + m1[2] * m2[1],
+    m1[1] * m2[0] + m1[3] * m2[1],
+    m1[0] * m2[2] + m1[2] * m2[3],
+    m1[1] * m2[2] + m1[3] * m2[3],
+    m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+    m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+  ];
+}
+
+async function buildTextLayer(): Promise<void> {
+  if (!st || !layer || !st.vpT) return;
+  const page = await st.lp.doc.getPage(st.current);
+  const tc = await page.getTextContent({ disableNormalization: true });
+  tlItems = (tc.items as Array<{ str?: string; transform?: number[]; width?: number }>)
+    .filter((x): x is TLItem => typeof x.str === 'string' && Array.isArray(x.transform)) ;
+
+  layer.querySelectorAll('.tl-run, .tl-input').forEach((n) => n.remove());
+  tlItems.forEach((item, idx) => {
+    if (!item.str.trim()) return;
+    const m = mul(st!.vpT!, item.transform);
+    const fontH = Math.hypot(m[2], m[3]);
+    if (fontH <= 1) return;
+    const w = Math.max(item.width * st!.scale, 6);
+    const box: RunBox = { x: m[4], y: m[5] - fontH * 0.83, w, h: fontH * 1.05, fontH };
+    const run = el('div', {
+      class: 'tl-run',
+      title: 'Cliquez pour modifier ce texte',
+      style: `left:${box.x}px; top:${box.y}px; width:${box.w}px; height:${box.h}px`,
+    });
+    run.addEventListener('pointerdown', (e) => e.stopPropagation());
+    run.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openRunEditor(item, idx, box);
+    });
+    layer!.append(run);
+  });
+}
+
+function openRunEditor(item: TLItem, idx: number, box: RunBox): void {
+  if (!layer) return;
+  layer.querySelectorAll('.tl-input').forEach((n) => n.remove());
+  const inp = el('input', {
+    type: 'text',
+    class: 'tl-input',
+    style: `left:${box.x - 4}px; top:${box.y - 5}px; width:${Math.max(box.w + 40, 160)}px; font-size:${Math.max(11, box.fontH * 0.92)}px`,
+  });
+  inp.value = item.str;
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const v = inp.value;
+    inp.remove();
+    if (v !== item.str) void commitRetouch(item, idx, v, box);
+  };
+  inp.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') commit();
+    if (e.key === 'Escape') { done = true; inp.remove(); }
+  });
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('pointerdown', (e) => e.stopPropagation());
+  layer.append(inp);
+  inp.focus();
+  inp.select();
+}
+
+async function commitRetouch(item: TLItem, idx: number, value: string, box: RunBox): Promise<void> {
+  if (!st) return;
+  const occurrence = tlItems.slice(0, idx).filter((x) => x.str === item.str).length;
+  const res = await applyTextEdit(st.working, {
+    pageIndex: st.current - 1,
+    oldText: item.str,
+    occurrence,
+    newText: value,
+  });
+
+  if (res.outcome === 'edited') {
+    st.history.push(st.working);
+    if (st.history.length > 6) st.history.shift();
+    st.working = res.bytes.buffer.slice(res.bytes.byteOffset, res.bytes.byteOffset + res.bytes.byteLength) as ArrayBuffer;
+    await reloadWorking();
+    syncUndo();
+    toast('Texte modifié directement dans le PDF.');
+  } else {
+    // repli : masque blanc + texte par-dessus, à la même position
+    const s = st.scale;
+    const pad = 1.5;
+    st.ovs.push({
+      id: nextId++, kind: 'rect', page: st.current,
+      vx: box.x / s - pad, vy: box.y / s - pad,
+      vw: box.w / s + 2 * pad, vh: box.h / s + 2 * pad,
+    });
+    st.ovs.push({
+      id: nextId++, kind: 'text', page: st.current,
+      vx: box.x / s, vy: box.y / s - (box.fontH / s) * 0.12,
+      text: value, size: Math.max(6, Math.round(box.fontH / s)), color: 'noir',
+    });
+    renderOverlays();
+    toast(`Édition directe impossible (${res.reason}) — remplacement visuel appliqué.`, 'err');
+  }
+}
+
+async function undoRetouch(): Promise<void> {
+  if (!st) return;
+  const prev = st.history.pop();
+  if (!prev) return;
+  st.working = prev;
+  await reloadWorking();
+  syncUndo();
+  toast('Retouche annulée.');
+}
+
+function syncUndo(): void {
+  const b = document.getElementById('undo-btn');
+  if (b) b.style.display = st && st.history.length > 0 ? '' : 'none';
+}
+
 /* ── Calques : création ─────────────────────────────────────────────── */
 
-function arm(kind: 'text' | 'rect'): void {
+function arm(kind: 'text' | 'rect' | 'retouch'): void {
   if (!st) return;
-  st.arm = st.arm === kind ? null : kind;
+  const on = st.arm !== kind;
+  st.arm = on ? kind : null;
   st.pendingImage = null;
   syncArmUi();
-  if (st.arm) toast(kind === 'text' ? 'Cliquez sur la page pour placer le texte.' : 'Cliquez sur la page pour placer le masque blanc.');
+  if (!on) {
+    if (kind === 'retouch') layer?.querySelectorAll('.tl-run, .tl-input').forEach((n) => n.remove());
+    return;
+  }
+  if (kind === 'retouch') {
+    void buildTextLayer();
+    toast('Cliquez un texte du document pour le modifier.');
+  } else {
+    layer?.querySelectorAll('.tl-run, .tl-input').forEach((n) => n.remove());
+    toast(kind === 'text' ? 'Cliquez sur la page pour placer le texte.' : 'Cliquez sur la page pour placer le masque blanc.');
+  }
 }
 
 function disarm(): void {
   if (!st) return;
   st.arm = null;
   st.pendingImage = null;
+  layer?.querySelectorAll('.tl-run, .tl-input').forEach((n) => n.remove());
   syncArmUi();
 }
 
 function syncArmUi(): void {
   document.getElementById('arm-text')?.classList.toggle('armed', st?.arm === 'text');
   document.getElementById('arm-rect')?.classList.toggle('armed', st?.arm === 'rect');
-  layer?.classList.toggle('placing', !!st?.arm);
+  document.getElementById('arm-retouch')?.classList.toggle('armed', st?.arm === 'retouch');
+  layer?.classList.toggle('placing', !!st?.arm && st?.arm !== 'retouch');
+  layer?.classList.toggle('retouch', st?.arm === 'retouch');
 }
 
 async function pickImage(f: File): Promise<void> {
@@ -499,7 +686,7 @@ function removeOv(id: number): void {
 
 function renderOverlays(): void {
   if (!st || !layer) return;
-  layer.replaceChildren();
+  layer.querySelectorAll('.ov').forEach((n) => n.remove());
   for (const ov of st.ovs.filter((o) => o.page === st!.current)) {
     layer.append(ovNode(ov));
   }
@@ -617,7 +804,7 @@ async function doExport(btn: HTMLButtonElement): Promise<void> {
   const label = btn.textContent;
   btn.textContent = 'Génération…';
   try {
-    const lib = await PDFDocument.load(st.lp.bytes, { ignoreEncryption: true });
+    const lib = await PDFDocument.load(st.working, { ignoreEncryption: true });
     const font: PDFFont = await lib.embedFont(StandardFonts.Helvetica);
     const charset = new Set(font.getCharacterSet());
 

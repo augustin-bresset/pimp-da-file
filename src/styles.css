@@ -391,6 +391,8 @@ input, select, textarea { font: inherit; color: inherit; }
 
 /* ── Éditer ───────────────────────────────────────────────────────────── */
 
+#view-edit .work { max-width: 1500px; }
+
 .edit-cols { flex: 1; display: flex; gap: 18px; min-height: 0; }
 .edit-main { flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
@@ -444,6 +446,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .swatch[data-c="blanc"].on { border: 2px solid var(--ink); }
 
 .pager { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); }
+.zoom-label { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); min-width: 46px; text-align: center; }
 .pager input {
   width: 46px;
   text-align: center;
@@ -476,6 +479,20 @@ input, select, textarea { font: inherit; color: inherit; }
 
 .ov-layer { position: absolute; inset: 0; line-height: normal; }
 .ov-layer.placing { cursor: crosshair; }
+
+/* couche texte de l'outil Retoucher */
+.tl-run { position: absolute; cursor: text; border-radius: 2px; }
+.ov-layer.retouch .tl-run:hover { outline: 1.5px dashed var(--ultra); background: rgba(39, 64, 214, 0.08); }
+.tl-input {
+  position: absolute;
+  z-index: 6;
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  border: 1.5px solid var(--ultra);
+  border-radius: 4px;
+  background: var(--sheet);
+  box-shadow: var(--shadow-2);
+  padding: 2px 5px;
+}
 
 /* calques ajoutés */
 .ov { position: absolute; touch-action: none; }
