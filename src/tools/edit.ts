@@ -8,7 +8,9 @@ import {
   PDFRadioGroup,
   PDFOptionList,
   type PDFFont,
+  type PDFDocument as PDFDocumentType,
 } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 import type { PageViewport } from 'pdfjs-dist';
 import { el, icon, toast, fmtSize } from '../ui/dom';
 import { dropSheet } from '../ui/dropsheet';
@@ -27,10 +29,18 @@ const COLORS: Record<ColorKey, { css: string; r: number; g: number; b: number }>
   blanc: { css: '#FFFFFF', r: 1, g: 1, b: 1 },
 };
 
+type StdFamily = 'helv' | 'times' | 'courier';
+type FontSpec =
+  | { kind: 'std'; family: StdFamily; bold: boolean; italic: boolean }
+  | { kind: 'custom'; id: number };
+const DEFAULT_FONT: FontSpec = { kind: 'std', family: 'helv', bold: false, italic: false };
+
+interface CustomFont { name: string; bytes: ArrayBuffer; cssName: string; }
+
 interface OvBase { id: number; page: number; vx: number; vy: number; }
-interface OvText extends OvBase { kind: 'text'; text: string; size: number; color: ColorKey; }
+interface OvText extends OvBase { kind: 'text'; text: string; size: number; color: ColorKey; font: FontSpec; }
 interface OvImage extends OvBase { kind: 'image'; vw: number; vh: number; bytes: ArrayBuffer; isPng: boolean; url: string; ratio: number; }
-interface OvRect extends OvBase { kind: 'rect'; vw: number; vh: number; }
+interface OvRect extends OvBase { kind: 'rect'; vw: number; vh: number; color?: [number, number, number]; }
 type Ov = OvText | OvImage | OvRect;
 
 interface FieldInfo {
@@ -41,7 +51,7 @@ interface FieldInfo {
   value: string | boolean;
 }
 
-interface TLItem { str: string; transform: number[]; width: number; }
+interface TLItem { str: string; transform: number[]; width: number; fontName?: string; }
 interface RunBox { x: number; y: number; w: number; h: number; fontH: number; }
 
 type Arm = 'text' | 'image' | 'rect' | 'retouch' | null;
@@ -69,13 +79,18 @@ interface EditState {
   fields: FieldInfo[];
   values: Map<string, string | boolean>;
   flatten: boolean;
+  customFonts: Map<number, CustomFont>;
 }
 
 let st: EditState | null = null;
 let nextId = 1;
+let nextFontId = 1;
 let root: HTMLElement;
 let layer: HTMLElement | null = null;
+let pageCanvas: HTMLCanvasElement | null = null;
 let tlItems: TLItem[] = [];
+let tlStyles: Record<string, { fontFamily?: string }> = {};
+let tlPage: unknown = null;
 let resizeTimer: number | undefined;
 
 export function initEdit(rootEl: HTMLElement): void {
@@ -137,6 +152,7 @@ async function loadFile(files: File[]): Promise<void> {
       fields,
       values: new Map(fields.map((f) => [f.name, f.value])),
       flatten: false,
+      customFonts: new Map(),
     };
     nextId = 1;
     render();
@@ -300,6 +316,56 @@ function render(): void {
 }
 
 function ctxControls(): HTMLElement {
+  const fontInput = el('input', {
+    type: 'file',
+    accept: '.ttf,.otf,font/ttf,font/otf',
+    class: 'hidden-input',
+    onchange: () => {
+      const f = fontInput.files?.[0];
+      fontInput.value = '';
+      if (f) void loadCustomFont(f);
+    },
+  });
+
+  const fontSel = el('select', {
+    id: 'ctx-font',
+    'aria-label': 'Police du texte',
+    onchange: () => {
+      const ov = selectedOv();
+      if (ov?.kind !== 'text') return;
+      const v = fontSel.value;
+      if (v === '__load') {
+        fontInput.click();
+        syncCtx();
+        return;
+      }
+      if (v.startsWith('std:')) {
+        const prev = ov.font.kind === 'std' ? ov.font : DEFAULT_FONT as { kind: 'std'; family: StdFamily; bold: boolean; italic: boolean };
+        ov.font = { kind: 'std', family: v.slice(4) as StdFamily, bold: prev.kind === 'std' ? prev.bold : false, italic: prev.kind === 'std' ? prev.italic : false };
+      } else if (v.startsWith('custom:')) {
+        ov.font = { kind: 'custom', id: Number(v.slice(7)) };
+      }
+      renderOverlays();
+      syncCtx();
+    },
+  });
+
+  const toggle = (id: string, label: string, style: string, flag: 'bold' | 'italic') =>
+    el('button', {
+      class: 'btn-icon tb-toggle',
+      id,
+      title: flag === 'bold' ? 'Gras' : 'Italique',
+      style,
+      onclick: () => {
+        const ov = selectedOv();
+        if (ov?.kind === 'text' && ov.font.kind === 'std') {
+          ov.font = { ...ov.font, [flag]: !ov.font[flag] };
+          renderOverlays();
+          syncCtx();
+        }
+      },
+    }, label);
+
   const sizeInput = el('input', {
     type: 'number',
     min: '6',
@@ -335,6 +401,10 @@ function ctxControls(): HTMLElement {
   return el(
     'span',
     { class: 'ctx', id: 'ctx' },
+    fontSel,
+    toggle('ctx-bold', 'B', 'font-weight:700', 'bold'),
+    toggle('ctx-italic', 'I', 'font-style:italic', 'italic'),
+    fontInput,
     sizeInput,
     ...swatches,
     el(
@@ -399,6 +469,7 @@ async function renderCurrentPage(): Promise<void> {
 
   const { canvas, viewport } = await renderPage(st.lp.doc, st.current, st.scale);
   st.vpT = viewport.transform as number[];
+  pageCanvas = canvas;
 
   layer = el('div', { class: 'ov-layer' });
   layer.addEventListener('pointerdown', (e) => {
@@ -461,7 +532,9 @@ async function buildTextLayer(): Promise<void> {
   if (!st || !layer || !st.vpT) return;
   const page = await st.lp.doc.getPage(st.current);
   const tc = await page.getTextContent({ disableNormalization: true });
-  tlItems = (tc.items as Array<{ str?: string; transform?: number[]; width?: number }>)
+  tlPage = page;
+  tlStyles = (tc.styles ?? {}) as Record<string, { fontFamily?: string }>;
+  tlItems = (tc.items as Array<{ str?: string; transform?: number[]; width?: number; fontName?: string }>)
     .filter((x): x is TLItem => typeof x.str === 'string' && Array.isArray(x.transform)) ;
 
   layer.querySelectorAll('.tl-run, .tl-input').forEach((n) => n.remove());
@@ -532,24 +605,80 @@ async function commitRetouch(item: TLItem, idx: number, value: string, box: RunB
     await reloadWorking();
     toast('Texte modifié directement dans le PDF.');
   } else {
-    // repli : masque blanc + texte par-dessus, à la même position
+    // repli : masque de la couleur du fond + texte par-dessus, à la même position
     const s = st.scale;
     const pad = 1.5;
+    const bg = sampleBackground(box) ?? [1, 1, 1];
+    const darkBg = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2] < 0.5;
     const rectOv: OvRect = {
       id: nextId++, kind: 'rect', page: st.current,
       vx: box.x / s - pad, vy: box.y / s - pad,
       vw: box.w / s + 2 * pad, vh: box.h / s + 2 * pad,
+      color: bg,
     };
     const textOv: OvText = {
       id: nextId++, kind: 'text', page: st.current,
       vx: box.x / s, vy: box.y / s - (box.fontH / s) * 0.12,
-      text: value, size: Math.max(6, Math.round(box.fontH / s)), color: 'noir',
+      text: value, size: Math.max(6, Math.round(box.fontH / s)),
+      color: darkBg ? 'blanc' : 'noir',
+      font: guessFont(item),
     };
     st.ovs.push(rectOv, textOv);
     pushAction({ type: 'add', ovs: [rectOv, textOv] });
     renderOverlays();
     toast(`Édition directe impossible (${res.reason}) — remplacement visuel appliqué.`, 'err');
   }
+}
+
+/* couleur dominante autour du texte, lue sur le rendu de la page */
+function sampleBackground(box: RunBox): [number, number, number] | null {
+  if (!pageCanvas) return null;
+  try {
+    const cssW = parseFloat(pageCanvas.style.width) || pageCanvas.width;
+    const ratio = pageCanvas.width / cssW;
+    const pad = 2;
+    const x = Math.max(0, Math.round((box.x - pad) * ratio));
+    const y = Math.max(0, Math.round((box.y - pad) * ratio));
+    const w = Math.min(pageCanvas.width - x, Math.round((box.w + 2 * pad) * ratio));
+    const h = Math.min(pageCanvas.height - y, Math.round((box.h + 2 * pad) * ratio));
+    if (w < 2 || h < 2) return null;
+    const data = pageCanvas.getContext('2d')!.getImageData(x, y, w, h).data;
+    // histogramme quantifié : le fond est la couleur majoritaire, le texte est minoritaire
+    const counts = new Map<number, { n: number; r: number; g: number; b: number }>();
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+      const e = counts.get(key) ?? { n: 0, r: 0, g: 0, b: 0 };
+      e.n++; e.r += r; e.g += g; e.b += b;
+      counts.set(key, e);
+    }
+    let best: { n: number; r: number; g: number; b: number } | null = null;
+    for (const e of counts.values()) if (!best || e.n > best.n) best = e;
+    if (!best) return null;
+    return [best.r / best.n / 255, best.g / best.n / 255, best.b / best.n / 255];
+  } catch {
+    return null;
+  }
+}
+
+/* devine la famille la plus proche à partir de la police d'origine */
+function guessFont(item: TLItem): FontSpec {
+  let name = '';
+  try {
+    const p = tlPage as { commonObjs?: { has(n: string): boolean; get(n: string): unknown } } | null;
+    if (item.fontName && p?.commonObjs?.has(item.fontName)) {
+      const f = p.commonObjs.get(item.fontName) as { name?: string } | null;
+      name = f?.name ?? '';
+    }
+  } catch { /* police non résolue */ }
+  const fam = tlStyles[item.fontName ?? '']?.fontFamily ?? '';
+  const s = name.toLowerCase();
+  const bold = /bold|black|heavy|semibold|demi/.test(s);
+  const italic = /italic|oblique/.test(s);
+  let family: StdFamily = 'helv';
+  if (/courier|mono/.test(s) || fam === 'monospace') family = 'courier';
+  else if (/times|serif|georgia|garamond|book|roman|minion|palatino|cambria/.test(s) || fam === 'serif') family = 'times';
+  return { kind: 'std', family, bold, italic };
 }
 
 /* ── Annuler / Rétablir ─────────────────────────────────────────────── */
@@ -701,7 +830,7 @@ function placeAt(e: PointerEvent): void {
 
   let ov: Ov;
   if (st.arm === 'text') {
-    ov = { id: nextId++, kind: 'text', page, vx, vy, text: 'Votre texte', size: 14, color: 'noir' };
+    ov = { id: nextId++, kind: 'text', page, vx, vy, text: 'Votre texte', size: 14, color: 'noir', font: { ...DEFAULT_FONT } };
   } else if (st.arm === 'image' && st.pendingImage) {
     const vw = Math.max(40, layerWidthUnits() * 0.3);
     ov = { id: nextId++, kind: 'image', page, vx, vy, vw, vh: vw / st.pendingImage.ratio, ...st.pendingImage };
@@ -755,15 +884,63 @@ function syncCtx(): void {
   if (!ctx) return;
   const ov = selectedOv();
   ctx.classList.toggle('on', !!ov);
+  const isText = ov?.kind === 'text';
   const sizeInput = document.getElementById('ctx-size') as HTMLInputElement | null;
   if (sizeInput) {
-    sizeInput.style.display = ov?.kind === 'text' ? '' : 'none';
+    sizeInput.style.display = isText ? '' : 'none';
     if (ov?.kind === 'text') sizeInput.value = String(ov.size);
   }
   ctx.querySelectorAll<HTMLElement>('.swatch').forEach((s) => {
-    s.style.display = ov?.kind === 'text' ? '' : 'none';
+    s.style.display = isText ? '' : 'none';
     s.classList.toggle('on', ov?.kind === 'text' && s.dataset.c === ov.color);
   });
+
+  const fontSel = document.getElementById('ctx-font') as HTMLSelectElement | null;
+  if (fontSel) {
+    fontSel.style.display = isText ? '' : 'none';
+    if (ov?.kind === 'text' && st) {
+      fontSel.replaceChildren(
+        el('option', { value: 'std:helv' }, 'Helvetica'),
+        el('option', { value: 'std:times' }, 'Times'),
+        el('option', { value: 'std:courier' }, 'Courier'),
+        ...[...st.customFonts.entries()].map(([id, f]) => el('option', { value: `custom:${id}` }, f.name)),
+        el('option', { value: '__load' }, '+ Charger une police…'),
+      );
+      fontSel.value = ov.font.kind === 'std' ? `std:${ov.font.family}` : `custom:${ov.font.id}`;
+    }
+  }
+  for (const [id, flag] of [['ctx-bold', 'bold'], ['ctx-italic', 'italic']] as const) {
+    const b = document.getElementById(id) as HTMLButtonElement | null;
+    if (!b) continue;
+    const std = ov?.kind === 'text' && ov.font.kind === 'std';
+    b.style.display = isText ? '' : 'none';
+    b.disabled = !std;
+    b.classList.toggle('on', std && ov.kind === 'text' && ov.font.kind === 'std' && ov.font[flag]);
+  }
+}
+
+async function loadCustomFont(f: File): Promise<void> {
+  if (!st) return;
+  const bytes = await f.arrayBuffer();
+  const id = nextFontId++;
+  const cssName = `opdf-font-${id}`;
+  try {
+    const face = new FontFace(cssName, bytes);
+    await face.load();
+    document.fonts.add(face);
+  } catch {
+    toast('Police illisible — formats acceptés : TTF, OTF.', 'err');
+    return;
+  }
+  const name = f.name.replace(/\.(ttf|otf)$/i, '');
+  st.customFonts.set(id, { name, bytes, cssName });
+  const ov = selectedOv();
+  if (ov?.kind === 'text') {
+    ov.font = { kind: 'custom', id };
+    renderOverlays();
+  }
+  syncCtx();
+  toast(`Police « ${name} » chargée.`);
 }
 
 function removeOv(id: number): void {
@@ -798,8 +975,28 @@ function applyGeom(node: HTMLElement, ov: Ov): void {
     if (inner) {
       inner.style.fontSize = `${ov.size * s}px`;
       inner.style.color = COLORS[ov.color].css;
+      const f = cssFont(ov.font);
+      inner.style.fontFamily = f.family;
+      inner.style.fontWeight = f.weight;
+      inner.style.fontStyle = f.style;
     }
   }
+  if (ov.kind === 'rect' && ov.color) {
+    node.style.background = `rgb(${Math.round(ov.color[0] * 255)}, ${Math.round(ov.color[1] * 255)}, ${Math.round(ov.color[2] * 255)})`;
+  }
+}
+
+function cssFont(spec: FontSpec): { family: string; weight: string; style: string } {
+  if (spec.kind === 'custom') {
+    const cf = st?.customFonts.get(spec.id);
+    return { family: cf ? `'${cf.cssName}', sans-serif` : 'sans-serif', weight: '400', style: 'normal' };
+  }
+  const families: Record<StdFamily, string> = {
+    helv: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+    times: "'Times New Roman', Times, serif",
+    courier: "'Courier New', Courier, monospace",
+  };
+  return { family: families[spec.family], weight: spec.bold ? '700' : '400', style: spec.italic ? 'italic' : 'normal' };
 }
 
 function ovNode(ov: Ov): HTMLElement {
@@ -902,8 +1099,39 @@ async function doExport(btn: HTMLButtonElement): Promise<void> {
   btn.textContent = 'Génération…';
   try {
     const lib = await PDFDocument.load(st.working, { ignoreEncryption: true });
-    const font: PDFFont = await lib.embedFont(StandardFonts.Helvetica);
-    const charset = new Set(font.getCharacterSet());
+
+    const fontCache = new Map<string, { font: PDFFont; charset: Set<number> }>();
+    let fontkitDone = false;
+    const getFont = async (spec: FontSpec): Promise<{ font: PDFFont; charset: Set<number> }> => {
+      const key = spec.kind === 'std' ? `std:${spec.family}:${spec.bold}:${spec.italic}` : `custom:${spec.id}`;
+      const hit = fontCache.get(key);
+      if (hit) return hit;
+      let f: PDFFont;
+      if (spec.kind === 'custom') {
+        const cf = st!.customFonts.get(spec.id);
+        if (!cf) return getFont(DEFAULT_FONT);
+        if (!fontkitDone) {
+          (lib as PDFDocumentType).registerFontkit(fontkit);
+          fontkitDone = true;
+        }
+        try {
+          f = await lib.embedFont(cf.bytes, { subset: true });
+        } catch {
+          toast(`La police « ${cf.name} » n'a pas pu être incorporée — Helvetica utilisée.`, 'err');
+          return getFont(DEFAULT_FONT);
+        }
+      } else {
+        const STD: Record<StdFamily, [StandardFonts, StandardFonts, StandardFonts, StandardFonts]> = {
+          helv: [StandardFonts.Helvetica, StandardFonts.HelveticaBold, StandardFonts.HelveticaOblique, StandardFonts.HelveticaBoldOblique],
+          times: [StandardFonts.TimesRoman, StandardFonts.TimesRomanBold, StandardFonts.TimesRomanItalic, StandardFonts.TimesRomanBoldItalic],
+          courier: [StandardFonts.Courier, StandardFonts.CourierBold, StandardFonts.CourierOblique, StandardFonts.CourierBoldOblique],
+        };
+        f = await lib.embedFont(STD[spec.family][(spec.bold ? 1 : 0) + (spec.italic ? 2 : 0)]);
+      }
+      const entry = { font: f, charset: new Set(f.getCharacterSet()) };
+      fontCache.set(key, entry);
+      return entry;
+    };
 
     // conversion coordonnées : viewport (échelle 1) → espace PDF
     const vpCache = new Map<number, PageViewport>();
@@ -929,12 +1157,13 @@ async function doExport(btn: HTMLButtonElement): Promise<void> {
       if (ov.kind === 'rect') {
         const [x1, y1] = await toPdf(ov.page, ov.vx, ov.vy);
         const [x2, y2] = await toPdf(ov.page, ov.vx + ov.vw, ov.vy + ov.vh);
+        const c = ov.color ?? [1, 1, 1];
         page.drawRectangle({
           x: Math.min(x1, x2),
           y: Math.min(y1, y2),
           width: Math.abs(x2 - x1),
           height: Math.abs(y2 - y1),
-          color: rgb(1, 1, 1),
+          color: rgb(c[0], c[1], c[2]),
         });
       } else if (ov.kind === 'image') {
         const img = ov.isPng ? await lib.embedPng(ov.bytes) : await lib.embedJpg(ov.bytes);
@@ -948,16 +1177,17 @@ async function doExport(btn: HTMLButtonElement): Promise<void> {
         });
       } else {
         const c = COLORS[ov.color];
+        const { font: ovFont, charset: ovCharset } = await getFont(ov.font);
         const lines = ov.text.split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
           // ligne i : la base de référence CSS est ≈ 1,0 × taille depuis le haut
           const [x, y] = await toPdf(ov.page, ov.vx, ov.vy + ov.size + i * ov.size * 1.3);
-          page.drawText(sanitize(lines[i], charset), {
+          page.drawText(sanitize(lines[i], ovCharset), {
             x,
             y,
             size: ov.size,
-            font,
+            font: ovFont,
             color: rgb(c.r, c.g, c.b),
           });
         }
@@ -980,7 +1210,7 @@ async function doExport(btn: HTMLButtonElement): Promise<void> {
             toast(`Le champ « ${fi.name} » n'a pas pu être rempli.`, 'err');
           }
         }
-        try { form.updateFieldAppearances(font); } catch { /* apparence par défaut */ }
+        try { form.updateFieldAppearances((await getFont(DEFAULT_FONT)).font); } catch { /* apparence par défaut */ }
         if (st.flatten) {
           try { form.flatten(); } catch { toast("Impossible d'aplatir ce formulaire — champs conservés.", 'err'); }
         }

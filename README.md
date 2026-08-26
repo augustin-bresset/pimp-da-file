@@ -11,10 +11,13 @@ Rendu des pages par [pdf.js](https://mozilla.github.io/pdf.js/), manipulation pa
 - **Éditer** —
   - **Retoucher** : modifier le texte existant *directement dans le PDF*
     quand la police le permet (encodage simple type WinAnsi) ; sinon un
-    remplacement visuel (masque + texte) est appliqué automatiquement,
-    avec annulation possible ;
-  - ajouter du texte, ajouter une image (PNG/JPEG), masquer une zone
-    (rectangle blanc) ;
+    remplacement visuel est appliqué automatiquement — le masque prend la
+    couleur du fond d'origine (échantillonnée sur le rendu) et la police la
+    plus proche est devinée (gras, italique, serif, mono) ;
+  - ajouter du texte avec choix de police : Helvetica / Times / Courier,
+    gras et italique, **ou votre propre police TTF/OTF** (incorporée dans
+    le PDF exporté) ;
+  - ajouter une image (PNG/JPEG), masquer une zone ;
   - remplir les champs de formulaire pour les PDF qui en contiennent
     (avec option d'aplatissement) ;
   - zoom avant/arrière et ajustement à la fenêtre ;
