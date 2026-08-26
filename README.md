@@ -1,4 +1,4 @@
-# open-pdf
+# pimp-da-file
 
 Outil PDF 100 % navigateur : aucun serveur, aucun envoi — vos fichiers ne quittent jamais l'onglet.
 Rendu des pages par [pdf.js](https://mozilla.github.io/pdf.js/), manipulation par [pdf-lib](https://pdf-lib.js.org/).
@@ -31,7 +31,7 @@ L'interface s'adapte au mobile (barre d'outils compacte, cibles tactiles
 ## Lancer en local
 
 ```bash
-./open-pdf.sh          # construit si besoin, sert dist/ et ouvre le navigateur
+./pimp-da-file.sh          # construit si besoin, sert dist/ et ouvre le navigateur
 ```
 
 Développement :
@@ -50,7 +50,7 @@ L'app est un site statique — le palier gratuit de Render suffit.
 2. Sur [dashboard.render.com](https://dashboard.render.com) : **New → Blueprint**,
    sélectionnez le dépôt — le fichier `render.yaml` configure tout
    (build `npm install && npm run build`, publication de `dist/`).
-3. L'app est servie sur `https://open-pdf-<xxxx>.onrender.com`.
+3. L'app est servie sur `https://pimp-da-file-<xxxx>.onrender.com`.
 
 Alternativement : **New → Static Site**, build command `npm install && npm run build`,
 publish directory `dist`.

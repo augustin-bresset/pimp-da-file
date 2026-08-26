@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lance open-pdf en local : construit l'app si besoin, sert dist/, ouvre le navigateur.
+# Lance pimp-da-file en local : construit l'app si besoin, sert dist/, ouvre le navigateur.
 set -e
 cd "$(dirname "$0")"
 PORT="${PORT:-4610}"
@@ -16,5 +16,5 @@ if ! curl -sf "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
 fi
 
 URL="http://localhost:$PORT"
-echo "open-pdf → $URL"
+echo "pimp-da-file → $URL"
 xdg-open "$URL" >/dev/null 2>&1 || open "$URL" >/dev/null 2>&1 || true

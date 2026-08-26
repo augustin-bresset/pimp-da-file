@@ -1,6 +1,6 @@
 {
-  "name": "open-pdf",
-  "short_name": "open-pdf",
+  "name": "pimp-da-file",
+  "short_name": "pimp-da-file",
   "description": "Outil PDF 100 % navigateur : fusionner, diviser, éditer.",
   "start_url": ".",
   "display": "standalone",

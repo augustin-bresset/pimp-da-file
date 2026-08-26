@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: open-pdf
+    name: pimp-da-file
     runtime: static
     buildCommand: npm install && npm run build
     staticPublishPath: dist
