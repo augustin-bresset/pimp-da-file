@@ -42,18 +42,17 @@ npm run dev            # serveur Vite avec rechargement à chaud
 npm run build          # tsc --noEmit + build de production dans dist/
 ```
 
-## Déployer sur Render (accès depuis n'importe quel appareil)
+## Déployer sur GitHub Pages (accès depuis n'importe quel appareil)
 
-L'app est un site statique — le palier gratuit de Render suffit.
+L'app est un site statique : le workflow `.github/workflows/deploy.yml`
+construit et publie `dist/` à chaque push sur `main`.
 
-1. Poussez ce dépôt sur GitHub (ou GitLab).
-2. Sur [dashboard.render.com](https://dashboard.render.com) : **New → Blueprint**,
-   sélectionnez le dépôt — le fichier `render.yaml` configure tout
-   (build `npm install && npm run build`, publication de `dist/`).
-3. L'app est servie sur `https://pimp-da-file-<xxxx>.onrender.com`.
-
-Alternativement : **New → Static Site**, build command `npm install && npm run build`,
-publish directory `dist`.
+1. **Settings → Actions → General** : vérifier que les actions sont autorisées
+   (« Allow all actions and reusable workflows »).
+2. **Settings → Pages → Source** : choisir **« GitHub Actions »**.
+3. Lancer le workflow (onglet **Actions** → « Déployer sur GitHub Pages » →
+   *Run workflow*), ou pousser un commit.
+4. L'app est servie sur `https://<compte>.github.io/pimp-da-file/`.
 
 ## Limites connues
 
@@ -63,4 +62,5 @@ publish directory `dist`.
   visuel. Le texte qui suit sur la ligne ne se recale pas si la longueur change.
 - Les pages pivotées (métadonnée /Rotate) peuvent placer les ajouts de biais.
 - Les PDF chiffrés par mot de passe ne sont pas pris en charge.
-- Texte ajouté : police Helvetica, jeu de caractères Latin-1 (accents français inclus).
+- Texte ajouté en police standard : jeu de caractères Latin-1 (accents français
+  inclus) ; une police TTF/OTF importée couvre tous ses propres glyphes.
