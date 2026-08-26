@@ -1,4 +1,4 @@
-# pimp-da-file
+# Pimp Da File
 
 Outil PDF 100 % navigateur : aucun serveur, aucun envoi — vos fichiers ne quittent jamais l'onglet.
 Rendu des pages par [pdf.js](https://mozilla.github.io/pdf.js/), manipulation par [pdf-lib](https://pdf-lib.js.org/).

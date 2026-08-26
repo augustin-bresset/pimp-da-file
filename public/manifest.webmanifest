@@ -1,6 +1,6 @@
 {
-  "name": "pimp-da-file",
-  "short_name": "pimp-da-file",
+  "name": "Pimp Da File",
+  "short_name": "Pimp Da File",
   "description": "Outil PDF 100 % navigateur : fusionner, diviser, éditer.",
   "start_url": ".",
   "display": "standalone",
