@@ -95,12 +95,17 @@ let tlRuns: MergedRun[] = [];
 let tlStyles: Record<string, { fontFamily?: string }> = {};
 let tlPage: unknown = null;
 let resizeTimer: number | undefined;
+let lastViewportW = window.innerWidth;
 
 export function initEdit(rootEl: HTMLElement): void {
   root = rootEl;
   render();
 
   window.addEventListener('resize', () => {
+    // le clavier virtuel ne change que la hauteur : re-rendre détruirait
+    // le champ en cours de saisie (et refermerait le clavier sur Android)
+    if (window.innerWidth === lastViewportW) return;
+    lastViewportW = window.innerWidth;
     if (!st || !root.closest('.view')?.classList.contains('is-active')) return;
     clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(() => void renderCurrentPage(), 200);
