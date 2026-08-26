@@ -53,6 +53,9 @@ interface FieldInfo {
 
 interface TLItem { str: string; transform: number[]; width: number; fontName?: string; }
 interface RunBox { x: number; y: number; w: number; h: number; fontH: number; }
+interface MergedRun { str: string; items: TLItem[]; box: RunBox; }
+
+const condenseUi = (s: string) => s.replace(/[\s ]+/g, '');
 
 type Arm = 'text' | 'image' | 'rect' | 'retouch' | null;
 
@@ -88,7 +91,7 @@ let nextFontId = 1;
 let root: HTMLElement;
 let layer: HTMLElement | null = null;
 let pageCanvas: HTMLCanvasElement | null = null;
-let tlItems: TLItem[] = [];
+let tlRuns: MergedRun[] = [];
 let tlStyles: Record<string, { fontFamily?: string }> = {};
 let tlPage: unknown = null;
 let resizeTimer: number | undefined;
@@ -534,47 +537,87 @@ async function buildTextLayer(): Promise<void> {
   const tc = await page.getTextContent({ disableNormalization: true });
   tlPage = page;
   tlStyles = (tc.styles ?? {}) as Record<string, { fontFamily?: string }>;
-  tlItems = (tc.items as Array<{ str?: string; transform?: number[]; width?: number; fontName?: string }>)
-    .filter((x): x is TLItem => typeof x.str === 'string' && Array.isArray(x.transform)) ;
+  const items = (tc.items as Array<{ str?: string; transform?: number[]; width?: number; fontName?: string }>)
+    .filter((x): x is TLItem => typeof x.str === 'string' && Array.isArray(x.transform));
+
+  /* Les PDF découpent souvent une ligne (voire un mot) en plusieurs
+     opérateurs : on fusionne les fragments contigus d'une même ligne
+     visuelle en une seule zone cliquable. */
+  interface Frag { it: TLItem; x: number; yBase: number; w: number; fontH: number; }
+  const frags: Frag[] = [];
+  for (const it of items) {
+    if (it.str.length === 0) continue;
+    const m = mul(st.vpT, it.transform);
+    const fontH = Math.hypot(m[2], m[3]);
+    if (fontH <= 1) continue;
+    frags.push({ it, x: m[4], yBase: m[5], w: Math.max(it.width * st.scale, 2), fontH });
+  }
+
+  tlRuns = [];
+  let cur: { str: string; items: TLItem[]; x: number; yBase: number; right: number; fontH: number } | null = null;
+  const flush = () => {
+    if (cur && cur.str.trim()) {
+      tlRuns.push({
+        str: cur.str,
+        items: cur.items,
+        box: { x: cur.x, y: cur.yBase - cur.fontH * 0.83, w: cur.right - cur.x, h: cur.fontH * 1.05, fontH: cur.fontH },
+      });
+    }
+    cur = null;
+  };
+  for (const g of frags) {
+    if (cur) {
+      const sameLine = Math.abs(g.yBase - cur.yBase) <= Math.max(2, cur.fontH * 0.3);
+      const gap = g.x - cur.right;
+      const okGap = gap >= -cur.fontH * 0.5 && gap <= Math.max(cur.fontH, g.fontH) * 1.2;
+      const okSize = Math.max(g.fontH, cur.fontH) / Math.max(1, Math.min(g.fontH, cur.fontH)) < 1.7;
+      if (sameLine && okGap && okSize) {
+        const spaceNeeded = gap > Math.max(cur.fontH, g.fontH) * 0.22 && !cur.str.endsWith(' ') && !g.it.str.startsWith(' ');
+        cur.str += (spaceNeeded ? ' ' : '') + g.it.str;
+        cur.items.push(g.it);
+        cur.right = Math.max(cur.right, g.x + g.w);
+        cur.fontH = Math.max(cur.fontH, g.fontH);
+        continue;
+      }
+      flush();
+    }
+    cur = { str: g.it.str, items: [g.it], x: g.x, yBase: g.yBase, right: g.x + g.w, fontH: g.fontH };
+  }
+  flush();
 
   layer.querySelectorAll('.tl-run, .tl-input').forEach((n) => n.remove());
-  tlItems.forEach((item, idx) => {
-    if (!item.str.trim()) return;
-    const m = mul(st!.vpT!, item.transform);
-    const fontH = Math.hypot(m[2], m[3]);
-    if (fontH <= 1) return;
-    const w = Math.max(item.width * st!.scale, 6);
-    const box: RunBox = { x: m[4], y: m[5] - fontH * 0.83, w, h: fontH * 1.05, fontH };
-    const run = el('div', {
+  tlRuns.forEach((run, idx) => {
+    const node = el('div', {
       class: 'tl-run',
       title: 'Cliquez pour modifier ce texte',
-      style: `left:${box.x}px; top:${box.y}px; width:${box.w}px; height:${box.h}px`,
+      style: `left:${run.box.x}px; top:${run.box.y}px; width:${run.box.w}px; height:${run.box.h}px`,
     });
-    run.addEventListener('pointerdown', (e) => e.stopPropagation());
-    run.addEventListener('click', (e) => {
+    node.addEventListener('pointerdown', (e) => e.stopPropagation());
+    node.addEventListener('click', (e) => {
       e.stopPropagation();
-      openRunEditor(item, idx, box);
+      openRunEditor(run, idx);
     });
-    layer!.append(run);
+    layer!.append(node);
   });
 }
 
-function openRunEditor(item: TLItem, idx: number, box: RunBox): void {
+function openRunEditor(run: MergedRun, idx: number): void {
   if (!layer) return;
+  const box = run.box;
   layer.querySelectorAll('.tl-input').forEach((n) => n.remove());
   const inp = el('input', {
     type: 'text',
     class: 'tl-input',
     style: `left:${box.x - 4}px; top:${box.y - 5}px; width:${Math.max(box.w + 40, 160)}px; font-size:${Math.max(11, box.fontH * 0.92)}px`,
   });
-  inp.value = item.str;
+  inp.value = run.str;
   let done = false;
   const commit = () => {
     if (done) return;
     done = true;
     const v = inp.value;
     inp.remove();
-    if (v !== item.str) void commitRetouch(item, idx, v, box);
+    if (v !== run.str) void commitRetouch(run, idx, v);
   };
   inp.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -588,12 +631,14 @@ function openRunEditor(item: TLItem, idx: number, box: RunBox): void {
   inp.select();
 }
 
-async function commitRetouch(item: TLItem, idx: number, value: string, box: RunBox): Promise<void> {
+async function commitRetouch(run: MergedRun, idx: number, value: string): Promise<void> {
   if (!st) return;
-  const occurrence = tlItems.slice(0, idx).filter((x) => x.str === item.str).length;
+  const box = run.box;
+  const key = condenseUi(run.str);
+  const occurrence = tlRuns.slice(0, idx).filter((r) => condenseUi(r.str) === key).length;
   const res = await applyTextEdit(st.working, {
     pageIndex: st.current - 1,
-    oldText: item.str,
+    oldText: run.str,
     occurrence,
     newText: value,
   });
@@ -621,7 +666,7 @@ async function commitRetouch(item: TLItem, idx: number, value: string, box: RunB
       vx: box.x / s, vy: box.y / s - (box.fontH / s) * 0.12,
       text: value, size: Math.max(6, Math.round(box.fontH / s)),
       color: darkBg ? 'blanc' : 'noir',
-      font: guessFont(item),
+      font: guessFont(run.items[0]),
     };
     st.ovs.push(rectOv, textOv);
     pushAction({ type: 'add', ovs: [rectOv, textOv] });

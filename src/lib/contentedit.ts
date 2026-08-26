@@ -28,7 +28,8 @@ export type EditResult =
   | { outcome: 'unsupported'; reason: string };
 
 interface FontCodec {
-  table: (string | undefined)[]; // code → caractère
+  bytesPerCode: 1 | 2; // 2 pour les polices composites (Identity-H)
+  decodeMap: Map<number, string>; // code → texte
   encode: Map<string, number>; // caractère → code sûr (glyphe présent)
 }
 
@@ -101,7 +102,7 @@ export async function applyTextEdit(bytes: ArrayBuffer, req: TextEditRequest): P
   }
 
   // 6. réécriture des octets
-  const lit = literalString(encoded);
+  const lit = codec.bytesPerCode === 2 ? hexString(encoded) : literalString(encoded);
   const repl: Array<{ start: number; end: number; text: string }> = [];
   for (let k = match.from; k <= match.to; k++) {
     const op = ops[k];
@@ -137,32 +138,48 @@ export async function applyTextEdit(bytes: ArrayBuffer, req: TextEditRequest): P
 
 interface Match { from: number; to: number; prefix: string; suffix: string; }
 
+/* Correspondance insensible aux espaces : dans les PDF, les espaces visuels
+   sont souvent des décalages géométriques (TJ, Td) absents du texte du flux,
+   et un mot peut être coupé en plusieurs opérateurs. On compare donc les
+   caractères non blancs, en gardant la carte vers les positions d'origine. */
+
+const condense = (s: string) => s.replace(/[\s ]+/g, '');
+
 function findMatches(ops: ShowOp[], target: string): Match[] {
+  const T = condense(target);
   const out: Match[] = [];
-  if (!target) return out;
-  for (let i = 0; i < ops.length; i++) {
-    const di = ops[i].decoded;
-    if (di == null) continue;
-    // cas 1 : contenu dans un seul opérateur
-    let idx = di.indexOf(target);
-    while (idx !== -1) {
-      out.push({ from: i, to: i, prefix: di.slice(0, idx), suffix: di.slice(idx + target.length) });
-      idx = di.indexOf(target, idx + Math.max(1, target.length));
+  if (!T) return out;
+
+  let C = '';
+  const map: Array<{ op: number; pos: number }> = [];
+  ops.forEach((op, oi) => {
+    if (op.decoded == null) {
+      // opérateur indéchiffrable : sentinelle infranchissable pour une correspondance
+      C += '';
+      map.push({ op: -1, pos: 0 });
+      return;
     }
-    // cas 2 : concaténation exacte d'opérateurs consécutifs i..j
-    if (di !== '' && target.startsWith(di) && di.length < target.length) {
-      let acc = di;
-      for (let j = i + 1; j < ops.length; j++) {
-        const dj = ops[j].decoded;
-        if (dj == null) break;
-        acc += dj;
-        if (acc === target) {
-          out.push({ from: i, to: j, prefix: '', suffix: '' });
-          break;
-        }
-        if (!target.startsWith(acc)) break;
-      }
+    for (let p = 0; p < op.decoded.length; p++) {
+      const ch = op.decoded[p];
+      if (ch === ' ' || ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') continue;
+      C += ch;
+      map.push({ op: oi, pos: p });
     }
+  });
+
+  let idx = C.indexOf(T);
+  while (idx !== -1) {
+    const first = map[idx];
+    const last = map[idx + T.length - 1];
+    if (first.op !== -1 && last.op !== -1) {
+      out.push({
+        from: first.op,
+        to: last.op,
+        prefix: ops[first.op].decoded!.slice(0, first.pos),
+        suffix: ops[last.op].decoded!.slice(last.pos + 1),
+      });
+    }
+    idx = C.indexOf(T, idx + 1);
   }
   return out;
 }
@@ -180,7 +197,12 @@ function buildCodecs(resources: PDFDict | undefined, doc: PDFDocument): Map<stri
     const name = key.toString().slice(1); // retire le « / »
 
     const subtype = fd.lookup(PDFName.of('Subtype'));
-    if (subtype === PDFName.of('Type0') || subtype === PDFName.of('Type3')) continue;
+    if (subtype === PDFName.of('Type0')) {
+      const codec = buildCidCodec(fd, doc);
+      if (codec) out.set(name, codec);
+      continue;
+    }
+    if (subtype === PDFName.of('Type3')) continue;
 
     // encodage de base
     const encoding = fd.lookup(PDFName.of('Encoding'));
@@ -214,15 +236,78 @@ function buildCodecs(resources: PDFDict | undefined, doc: PDFDocument): Map<stri
     // codes « sûrs » : restreints aux glyphes dont la chasse est déclarée
     const allowed = allowedCodes(fd, doc);
     const encode = new Map<string, number>();
+    const decodeMap = new Map<number, string>();
     for (let c = 0; c < 256; c++) {
       const ch = table[c];
       if (ch === undefined) continue;
+      decodeMap.set(c, ch);
       if (allowed && !allowed.has(c)) continue;
       if (!encode.has(ch)) encode.set(ch, c);
     }
-    out.set(name, { table, encode });
+    out.set(name, { bytesPerCode: 1, decodeMap, encode });
   }
   return out;
+}
+
+/* Police composite Identity-H : on décode via sa table ToUnicode, et on ne
+   ré-encode que les caractères déjà employés dans le document (les seuls
+   dont le glyphe est garanti présent dans le sous-ensemble embarqué). */
+function buildCidCodec(fd: PDFDict, doc: PDFDocument): FontCodec | null {
+  if (fd.lookup(PDFName.of('Encoding')) !== PDFName.of('Identity-H')) return null;
+  const tuRef = fd.lookup(PDFName.of('ToUnicode'));
+  const tu = tuRef instanceof PDFRef ? doc.context.lookup(tuRef) : tuRef;
+  if (!(tu instanceof PDFRawStream)) return null;
+  let text: string;
+  try {
+    text = new TextDecoder('latin1').decode(decodePDFRawStream(tu).decode());
+  } catch {
+    return null;
+  }
+  const decodeMap = parseToUnicode(text);
+  if (decodeMap.size === 0) return null;
+  const encode = new Map<string, number>();
+  for (const [code, s] of decodeMap) {
+    if (s.length === 1 && !encode.has(s)) encode.set(s, code);
+  }
+  return { bytesPerCode: 2, decodeMap, encode };
+}
+
+function parseToUnicode(src: string): Map<number, string> {
+  const map = new Map<number, string>();
+  const hexToStr = (h: string): string => {
+    let s = '';
+    for (let i = 0; i + 4 <= h.length; i += 4) s += String.fromCharCode(parseInt(h.slice(i, i + 4), 16));
+    return s;
+  };
+  for (const m of src.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
+    for (const p of m[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>/g)) {
+      if (p[2].length >= 4) map.set(parseInt(p[1], 16), hexToStr(p[2]));
+    }
+  }
+  const arrayForm = /<([0-9A-Fa-f]+)>\s*<[0-9A-Fa-f]+>\s*\[((?:\s*<[0-9A-Fa-f]*>)+)\s*\]/g;
+  for (const m of src.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
+    const body = m[1];
+    for (const p of body.matchAll(arrayForm)) {
+      const lo = parseInt(p[1], 16);
+      [...p[2].matchAll(/<([0-9A-Fa-f]*)>/g)].forEach((d, i) => {
+        if (d[1].length >= 4) map.set(lo + i, hexToStr(d[1]));
+      });
+    }
+    // forme simple <lo> <hi> <base> — après retrait des formes tableau
+    for (const p of body.replace(arrayForm, '').matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) {
+      const lo = parseInt(p[1], 16);
+      const hi = parseInt(p[2], 16);
+      if (p[3].length < 4 || hi < lo || hi - lo > 65535) continue;
+      const base = hexToStr(p[3]);
+      const last = base.charCodeAt(base.length - 1);
+      for (let c = lo; c <= hi; c++) map.set(c, base.slice(0, -1) + String.fromCharCode(last + (c - lo)));
+    }
+  }
+  return map;
+}
+
+function hexString(codes: number[]): string {
+  return '<' + codes.map((c) => c.toString(16).padStart(4, '0').toUpperCase()).join('') + '>';
 }
 
 function isSymbolic(fd: PDFDict, doc: PDFDocument): boolean {
@@ -270,8 +355,11 @@ function tokenize(buf: Uint8Array, codecs: Map<string, FontCodec>): ShowOp[] {
     if (codec) {
       decoded = '';
       for (const s of spans) {
-        for (const code of spanBytes(buf, s)) {
-          const ch = codec.table[code];
+        const bytes = spanBytes(buf, s);
+        if (codec.bytesPerCode === 2 && bytes.length % 2 !== 0) { decoded = null; break; }
+        for (let k = 0; k < bytes.length; k += codec.bytesPerCode) {
+          const code = codec.bytesPerCode === 2 ? (bytes[k] << 8) | bytes[k + 1] : bytes[k];
+          const ch = codec.decodeMap.get(code);
           if (ch === undefined) { decoded = null; break; }
           decoded += ch;
         }

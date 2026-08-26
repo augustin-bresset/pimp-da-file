@@ -57,8 +57,11 @@ construit et publie `dist/` à chaque push sur `main`.
 ## Limites connues
 
 - « Retoucher » modifie le PDF en place pour les polices simples à encodage
-  inversible (WinAnsi, différences AGL) ; les polices composites (CID/Type0,
-  sous-ensembles) et le texte dans des XObjects basculent en remplacement
+  inversible (WinAnsi, différences AGL) et pour les polices composites
+  Identity-H via leur table ToUnicode — dans ce dernier cas, le nouveau texte
+  ne peut employer que des caractères déjà présents dans le document (seuls
+  leurs glyphes existent dans le sous-ensemble embarqué). Les autres cas
+  (texte dans des XObjects, encodages exotiques) basculent en remplacement
   visuel. Le texte qui suit sur la ligne ne se recale pas si la longueur change.
 - Les pages pivotées (métadonnée /Rotate) peuvent placer les ajouts de biais.
 - Les PDF chiffrés par mot de passe ne sont pas pris en charge.
